@@ -1,5 +1,7 @@
 # picgo-mcp
 
+> **快速开始：** 将本仓库链接发送给你的 Coding Agent，并告诉它：“请帮我安装并配置这个 PicGo MCP Server。”
+
 一个将 [PicGo Core](https://github.com/PicGo/PicGo-Core) 直接嵌入进程的 MCP stdio server。它可以让 Codex、Claude Desktop 等 MCP 客户端复用已有的 PicGo 图床配置，不要求 PicGo 桌面端运行，也不经过 `127.0.0.1:36677`。
 
 ## 特性
