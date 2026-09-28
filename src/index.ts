@@ -29,14 +29,12 @@ const resolution = resolveConfigPath(argumentValue('--config'));
 const server = createServer(new PicGoService(resolution));
 const transport = new StdioServerTransport();
 
-process.on('SIGINT', async () => {
+async function shutdown() {
   await server.close();
   process.exit(0);
-});
-process.on('SIGTERM', async () => {
-  await server.close();
-  process.exit(0);
-});
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
 
 try {
   await server.connect(transport);

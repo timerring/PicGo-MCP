@@ -21,5 +21,4 @@ test('PICGO_CONFIG_PATH is supported', () => {
   const result = resolveConfigPath();
   assert.equal(result.configPath, '/tmp/picgo-test-config.json');
   assert.equal(result.source, 'environment');
-  assert.equal(result.exists, false);
 });

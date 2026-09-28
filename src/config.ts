@@ -4,7 +4,6 @@ import { isAbsolute, resolve } from 'node:path';
 
 export interface ConfigResolution {
   configPath: string;
-  exists: boolean;
   searchedPaths: string[];
   source: 'argument' | 'environment' | 'discovered' | 'default';
 }
@@ -36,23 +35,22 @@ export function defaultConfigCandidates(): string[] {
 export function resolveConfigPath(explicitPath?: string): ConfigResolution {
   if (explicitPath) {
     const configPath = expandHome(explicitPath);
-    return { configPath, exists: existsSync(configPath), searchedPaths: [configPath], source: 'argument' };
+    return { configPath, searchedPaths: [configPath], source: 'argument' };
   }
 
   if (process.env.PICGO_CONFIG_PATH) {
     const configPath = expandHome(process.env.PICGO_CONFIG_PATH);
-    return { configPath, exists: existsSync(configPath), searchedPaths: [configPath], source: 'environment' };
+    return { configPath, searchedPaths: [configPath], source: 'environment' };
   }
 
   const searchedPaths = defaultConfigCandidates();
   const found = searchedPaths.find(existsSync);
   if (found) {
-    return { configPath: found, exists: true, searchedPaths, source: 'discovered' };
+    return { configPath: found, searchedPaths, source: 'discovered' };
   }
 
   return {
     configPath: searchedPaths.at(-1)!,
-    exists: false,
     searchedPaths,
     source: 'default',
   };

@@ -1,18 +1,12 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createRequire } from 'node:module';
 import { z } from 'zod';
-import type { PicGoService, UploadedImage } from './picgo-service.js';
+import type { PicGoService } from './picgo-service.js';
+
+const { version } = createRequire(import.meta.url)('../package.json') as { version: string };
 
 function jsonContent(value: unknown) {
   return [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }];
-}
-
-function uploadPayload(service: PicGoService, images: UploadedImage[]) {
-  return {
-    images,
-    urls: images.map((image) => image.url),
-    markdown: images.map((image) => `![${image.fileName ?? 'image'}](${image.url})`).join('\n'),
-    formattedOutput: service.formatOutput(images),
-  };
 }
 
 function toolError(error: unknown) {
@@ -21,7 +15,16 @@ function toolError(error: unknown) {
 }
 
 export function createServer(service: PicGoService): McpServer {
-  const server = new McpServer({ name: 'picgo-mcp', version: '0.1.0' });
+  const server = new McpServer({ name: 'picgo-mcp', version });
+
+  async function upload(sources: string[]) {
+    try {
+      const images = await service.upload(sources);
+      return { content: jsonContent({ images, formattedOutput: service.formatOutput(images) }) };
+    } catch (error) {
+      return toolError(error);
+    }
+  }
 
   server.registerTool(
     'upload_image',
@@ -31,14 +34,7 @@ export function createServer(service: PicGoService): McpServer {
       inputSchema: { source: z.string().min(1).describe('Local file path, file:// URL, or HTTP(S) image URL') },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
-    async ({ source }) => {
-      try {
-        const images = await service.upload([source]);
-        return { content: jsonContent(uploadPayload(service, images)) };
-      } catch (error) {
-        return toolError(error);
-      }
-    },
+    ({ source }) => upload([source]),
   );
 
   server.registerTool(
@@ -55,14 +51,7 @@ export function createServer(service: PicGoService): McpServer {
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
-    async ({ sources }) => {
-      try {
-        const images = await service.upload(sources);
-        return { content: jsonContent(uploadPayload(service, images)) };
-      } catch (error) {
-        return toolError(error);
-      }
-    },
+    ({ sources }) => upload(sources),
   );
 
   server.registerTool(

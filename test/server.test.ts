@@ -17,7 +17,6 @@ after(() => rmSync(temporaryDirectory, { recursive: true, force: true }));
 test('status reports metadata without returning secret values', () => {
   const service = new PicGoService({
     configPath,
-    exists: true,
     searchedPaths: [configPath],
     source: 'argument',
   });
@@ -33,7 +32,6 @@ test('status redacts the local home directory from config paths', () => {
   const privatePath = resolve(homedir(), '.picgo/nonexistent-private-test.json');
   const service = new PicGoService({
     configPath: privatePath,
-    exists: false,
     searchedPaths: [privatePath],
     source: 'argument',
   });
@@ -46,7 +44,6 @@ test('status redacts the local home directory from config paths', () => {
 test('MCP server exposes the expected tools and serves status', async () => {
   const service = new PicGoService({
     configPath,
-    exists: true,
     searchedPaths: [configPath],
     source: 'argument',
   });
@@ -75,9 +72,49 @@ test('MCP server exposes the expected tools and serves status', async () => {
 test('upload rejects a missing local file before invoking PicGo', async () => {
   const service = new PicGoService({
     configPath,
-    exists: true,
     searchedPaths: [configPath],
     source: 'argument',
   });
   await assert.rejects(() => service.upload(['/definitely/not/a/picture.png']), /does not exist/);
+});
+
+test('both upload tools return the compact payload and propagate failures', async (t) => {
+  const service = new PicGoService({ configPath, searchedPaths: [configPath], source: 'argument' });
+  const images = [{ url: 'https://example.test/image.png', fileName: 'image.png' }];
+  const upload = t.mock.method(service, 'upload', async () => images);
+  t.mock.method(service, 'formatOutput', () => '![image](https://example.test/image.png)');
+  const server = createServer(service);
+  const client = new Client({ name: 'picgo-mcp-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+  try {
+    const requests = [
+      { name: 'upload_image', arguments: { source: '/image.png' } },
+      { name: 'upload_images', arguments: { sources: ['/image.png', '/second.png'] } },
+    ];
+    for (const request of requests) {
+      const result = await client.callTool(request);
+      assert.equal(result.isError, undefined);
+      const content = result.content as Array<{ type: string; text: string }>;
+      assert.deepEqual(JSON.parse(content[0].text), {
+        images,
+        formattedOutput: '![image](https://example.test/image.png)',
+      });
+    }
+    assert.deepEqual(upload.mock.calls.map((call) => call.arguments[0]), [
+      ['/image.png'],
+      ['/image.png', '/second.png'],
+    ]);
+
+    upload.mock.mockImplementation(async () => { throw new Error('Upload failed'); });
+    for (const request of requests) {
+      const result = await client.callTool(request);
+      assert.equal(result.isError, true);
+      assert.deepEqual(result.content, [{ type: 'text', text: 'Upload failed' }]);
+    }
+  } finally {
+    await client.close();
+    await server.close();
+  }
 });

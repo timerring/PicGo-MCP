@@ -175,7 +175,9 @@ ${url}
 ![${uploadedName}](${url})
 ```
 
-工具响应始终包含图片信息、URL 数组、Markdown 和按模板生成的 `formattedOutput`，因此调用方可以根据需要选择字段。
+工具响应包含 `images` 图片信息和按模板生成的 `formattedOutput`。图片链接从 `images[].url` 获取；需要 Markdown 时，将输出模板设置为 `![${uploadedName}](${url})`。
+
+响应字段已精简：原先读取 `urls` 或 `markdown` 的调用方，应分别改为读取 `images[].url` 或配置 Markdown 模板后读取 `formattedOutput`。
 
 ## MCP 工具
 
@@ -219,10 +221,6 @@ ${url}
       "size": 123456
     }
   ],
-  "urls": [
-    "https://cdn.example.com/images/2026-08-23-17-34-47-example.png"
-  ],
-  "markdown": "![2026-08-23-17-34-47-example.png](https://cdn.example.com/images/2026-08-23-17-34-47-example.png)",
   "formattedOutput": "https://cdn.example.com/images/2026-08-23-17-34-47-example.png"
 }
 ```
@@ -248,9 +246,9 @@ PicGo 3.0.1 的依赖树目前仍包含 `image-size` 和旧版 `inquirer/tmp` �
 
 ```bash
 npm install
+npm run build
 npm test
 npm run check
-npm run build
 ```
 
 当前测试覆盖配置发现、MCP 工具注册、状态脱敏、上传输入校验、命名模板、输出模板和发布文件隐私检查。
