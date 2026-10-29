@@ -61,6 +61,23 @@ test('batch results keep successful URLs and identify failed or filtered inputs'
   assert.equal(result.formattedOutput, 'https://example.test/first.png\nhttps://example.test/last.png');
 });
 
+test('remote sources preserve URL query parameters on success and failure', async (t) => {
+  const { service } = fixture(t);
+  const home = homedir().replaceAll('\\', '/');
+  const sources = [
+    `https://example.test/image.png?path=${home}/image.png`,
+    `https://example.test/image.png?path=${home}/image.png&fail=1`,
+  ];
+  t.mock.method(PicGo.prototype, 'upload', async (_input: string[]) => {
+    if (_input[0].endsWith('fail=1')) throw new Error('Fixture upload failure');
+    return [uploaded('image.png')];
+  });
+
+  const result = await service.upload(sources);
+  assert.deepEqual(result.results.map(item => item.status), ['success', 'error']);
+  assert.deepEqual(result.results.map(item => item.source), sources);
+});
+
 test('an invalid output template is rejected before any upload starts', async (t) => {
   const { service } = fixture(t, '${unsupported}');
   const upload = t.mock.method(PicGo.prototype, 'upload', async () => [uploaded('image.png')]);

@@ -165,6 +165,7 @@ export class PicGoService {
       const results: UploadResult[] = [];
       try {
         for (const [index, source] of sources.entries()) {
+          const publicSource = /^https?:\/\//i.test(source.trim()) ? source : redactHomePath(source);
           this.uploadContext = { index, count: sources.length, now, nameTemplate };
           let output: IImgInfo[] = [];
           let failure: unknown;
@@ -186,14 +187,14 @@ export class PicGoService {
           if (failed || completed.length === 0 || completed.length !== output.length) {
             results.push({
               index,
-              source: redactHomePath(source),
+              source: publicSource,
               status: 'error',
               error: publicErrorMessage(failure ?? new Error(
                 'PicGo returned incomplete upload results. Review the successful images before retrying this source.',
               )),
             });
           } else {
-            results.push({ index, source: redactHomePath(source), status: 'success' });
+            results.push({ index, source: publicSource, status: 'success' });
           }
         }
       } finally {
