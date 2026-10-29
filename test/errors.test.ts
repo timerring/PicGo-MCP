@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { homedir } from 'node:os';
-import { join, sep } from 'node:path';
+import { join, posix, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { publicErrorMessage, redactHomePath } from '../src/errors.js';
@@ -21,8 +21,9 @@ test('redacts local file URLs while preserving ordinary HTTP URLs', () => {
   assert.equal(redactHomePath(`Cannot read ${pathToFileURL(join(home, 'image with space.png')).href}`),
     'Cannot read file://~/image%20with%20space.png');
   assert.equal(redactHomePath(pathToFileURL(home).href), 'file://~');
-  const remote = `https://example.test${home.replaceAll('\\', '/')}/image.png`;
-  assert.equal(redactHomePath(remote), remote);
+  const remote = new URL('https://example.test');
+  remote.pathname = posix.join('/', home.replaceAll('\\', '/'), 'image.png');
+  assert.equal(redactHomePath(remote.href), remote.href);
 });
 
 test('preserves similar directory prefixes and unrelated nested paths', () => {
@@ -31,7 +32,7 @@ test('preserves similar directory prefixes and unrelated nested paths', () => {
     const path = `${home}${suffix}${sep}image.png`;
     assert.equal(redactHomePath(path), path);
   }
-  const nested = `/archive${home.replaceAll('\\', '/')}/image.png`;
+  const nested = posix.join('/archive', home.replaceAll('\\', '/'), 'image.png');
   assert.equal(redactHomePath(nested), nested);
 });
 

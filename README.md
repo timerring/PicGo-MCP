@@ -262,10 +262,13 @@ PicGo 3.0.1 的依赖树目前仍包含 `image-size` 和旧版 `inquirer/tmp` �
 
 ```bash
 npm install
-npm run build
 npm test
 npm run check
 ```
+
+`npm test` 会先编译 CLI，再运行全部测试；测试文件由 Node.js 枚举，在不同系统和 shell 中使用同一套入口。
+
+GitHub Actions 在推送到 `main`、向 `main` 提交 PR 和手动触发时运行 CI，覆盖 Ubuntu、macOS、Windows 与 Node.js 20.19.0、22、24、26 的组合。每个任务执行 `npm ci`、类型检查、构建与测试，并检查 npm 发布包清单。工作流配置见 [ci.yml](.github/workflows/ci.yml)。
 
 当前测试覆盖配置发现与变更检测、真实 stdio 通信和日志隔离、MCP 工具响应、批量部分失败、串行队列恢复、路径脱敏、跨平台来源解析、命名与输出模板、发布文件隐私检查。上传测试使用临时配置和本地模拟上传器。
 
