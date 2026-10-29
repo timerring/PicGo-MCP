@@ -1,18 +1,31 @@
-import { existsSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { isAbsolute, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { existsSync, readFileSync } from 'node:fs';
 import { PicGo, type IConfig, type IImgInfo } from 'picgo';
 import type { ConfigResolution } from './config.js';
-import { renderOutput, renderUploadName } from './templates.js';
+import { publicErrorMessage, redactHomePath } from './errors.js';
+import { normalizeSource } from './sources.js';
+import { renderOutput, renderUploadName, validateOutputTemplate } from './templates.js';
 
 export interface UploadedImage {
+  sourceIndex: number;
   url: string;
   originalUrl?: string;
   fileName?: string;
   width?: number;
   height?: number;
   size?: number;
+}
+
+export interface UploadResult {
+  index: number;
+  source: string;
+  status: 'success' | 'error';
+  error?: string;
+}
+
+export interface UploadBatchResult {
+  images: UploadedImage[];
+  results: UploadResult[];
+  formattedOutput: string;
 }
 
 export interface PicGoStatus {
@@ -30,37 +43,10 @@ export interface PicGoStatus {
 
 const METADATA_FIELDS = new Set(['_id', '_configName', '_createdAt', '_updatedAt']);
 
-function redactHomePath(filePath: string): string {
-  const home = homedir();
-  if (filePath === home) return '~';
-  if (filePath.startsWith(`${home}${sep}`)) return `~${filePath.slice(home.length)}`;
-  return filePath;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function normalizeSource(source: string): string {
-  const value = source.trim();
-  if (!value) throw new Error('Image source cannot be empty.');
-
-  if (/^https?:\/\//i.test(value)) return value;
-  if (/^file:\/\//i.test(value)) return fileURLToPath(value);
-  if (/^[a-z][a-z\d+.-]*:/i.test(value)) {
-    throw new Error(`Unsupported image source protocol: ${value.split(':', 1)[0]}`);
-  }
-
-  const filePath = isAbsolute(value) ? value : resolve(value);
-  if (!existsSync(filePath)) throw new Error(`Image file does not exist: ${filePath}`);
-  if (!statSync(filePath).isFile()) throw new Error(`Image source is not a file: ${filePath}`);
-  return filePath;
-}
-
-function toUploadedImage(image: IImgInfo, index: number): UploadedImage {
-  if (!image.imgUrl) throw new Error(`PicGo returned no URL for uploaded image #${index + 1}.`);
+function toUploadedImage(image: IImgInfo, sourceIndex: number): UploadedImage {
   return {
-    url: image.imgUrl,
+    sourceIndex,
+    url: image.imgUrl!,
     ...(image.originImgUrl ? { originalUrl: image.originImgUrl } : {}),
     ...(image.fileName ? { fileName: image.fileName } : {}),
     ...(image.width !== undefined ? { width: image.width } : {}),
@@ -71,9 +57,23 @@ function toUploadedImage(image: IImgInfo, index: number): UploadedImage {
 
 export class PicGoService {
   private picgo?: PicGo;
-  private uploadQueue: Promise<void> = Promise.resolve();
+  private configSnapshot?: string;
+  private queue: Promise<void> = Promise.resolve();
+  private uploadContext?: {
+    index: number;
+    count: number;
+    now: Date;
+    nameTemplate?: string;
+    lifecycle?: { output: IImgInfo[] };
+  };
 
   constructor(private readonly resolution: ConfigResolution) {}
+
+  private async serialized<T>(operation: () => T | Promise<T>): Promise<T> {
+    const result = this.queue.then(operation);
+    this.queue = result.then(() => undefined, () => undefined);
+    return result;
+  }
 
   private getPicGo(): PicGo {
     if (!existsSync(this.resolution.configPath)) {
@@ -82,98 +82,128 @@ export class PicGoService {
           'Pass --config /path/to/config.json or set PICGO_CONFIG_PATH.',
       );
     }
+    const snapshot = readFileSync(this.resolution.configPath, 'utf8');
+    if (this.picgo && snapshot !== this.configSnapshot) {
+      throw new Error('PicGo configuration changed. Restart the MCP connection to load the updated settings.');
+    }
     if (!this.picgo) {
-      this.picgo = new PicGo(this.resolution.configPath);
-      this.picgo.helper.beforeUploadPlugins.register('picgoMcpUploadName', {
+      const picgo = new PicGo(this.resolution.configPath);
+      picgo.helper.beforeUploadPlugins.register('picgoMcpUploadName', {
         handle: (ctx) => {
-          const template =
-            ctx.getConfig<string>('settings.picgoMcp.uploadNameTemplate') ??
-            ctx.getConfig<string>('customUploadName');
-          if (!template) return;
-          const now = new Date();
-          ctx.output.forEach((image, index, images) => {
-            image.fileName = renderUploadName(template, image.fileName ?? '', index, images.length, now);
-          });
+          const context = this.uploadContext;
+          if (!context) return;
+          // PicGo runs hooks and uploaders on a separate lifecycle context.
+          context.lifecycle = ctx;
+          if (!context.nameTemplate) return;
+          for (const image of ctx.output) {
+            image.fileName = renderUploadName(
+              context.nameTemplate, image.fileName ?? '', context.index, context.count, context.now,
+            );
+          }
         },
       });
+      // PicGo can migrate the file while constructing the instance.
+      this.configSnapshot = readFileSync(this.resolution.configPath, 'utf8');
+      this.picgo = picgo;
     }
     return this.picgo;
   }
 
-  formatOutput(images: UploadedImage[]): string {
-    const picgo = this.getPicGo();
-    const template =
-      picgo.getConfig<string>('settings.picgoMcp.outputFormat') ??
-      picgo.getConfig<string>('customOutputFormat') ??
-      '${url}';
-    return images.map((image) => renderOutput(template, image.url, image.fileName ?? 'image')).join('\n');
-  }
-
-  status(): PicGoStatus {
-    const configExists = existsSync(this.resolution.configPath);
-    const publicConfigPath = redactHomePath(this.resolution.configPath);
-    const publicSearchedPaths = this.resolution.searchedPaths.map(redactHomePath);
-    if (!configExists) {
-      return {
-        configPath: publicConfigPath,
-        configExists: false,
+  async status(): Promise<PicGoStatus> {
+    return this.serialized(() => {
+      const configExists = existsSync(this.resolution.configPath);
+      const common = {
+        configPath: redactHomePath(this.resolution.configPath),
+        configExists,
         configSource: this.resolution.source,
-        searchedPaths: publicSearchedPaths,
-        uploaderConfigured: false,
-        configuredFields: [],
-        availableUploaders: [],
+        searchedPaths: this.resolution.searchedPaths.map(redactHomePath),
       };
-    }
+      if (!configExists) {
+        return { ...common, uploaderConfigured: false, configuredFields: [], availableUploaders: [] };
+      }
 
-    const picgo = this.getPicGo();
-    const config = picgo.getConfig<IConfig>();
-    const uploader = config.picBed?.uploader;
-    const current = config.picBed?.current;
-    const activeConfig = uploader ? picgo.uploaderConfig.getActiveConfig(uploader) : undefined;
-    const legacyConfig = uploader ? config.picBed?.[uploader] : undefined;
-    const uploaderConfig = activeConfig ?? legacyConfig;
-    const configuredFields =
-      uploaderConfig && typeof uploaderConfig === 'object'
+      const picgo = this.getPicGo();
+      const config = picgo.getConfig<IConfig>();
+      const uploader = config.picBed?.uploader;
+      const current = config.picBed?.current;
+      const activeConfig = uploader ? picgo.uploaderConfig.getActiveConfig(uploader) : undefined;
+      const uploaderConfig = activeConfig ?? (uploader ? config.picBed?.[uploader] : undefined);
+      const configuredFields = uploaderConfig && typeof uploaderConfig === 'object'
         ? Object.keys(uploaderConfig).filter((key) => !METADATA_FIELDS.has(key)).sort()
         : [];
 
-    return {
-      configPath: publicConfigPath,
-      configExists: true,
-      configSource: this.resolution.source,
-      searchedPaths: publicSearchedPaths,
-      picgoVersion: picgo.VERSION,
-      uploader,
-      current,
-      uploaderConfigured: configuredFields.length > 0,
-      configuredFields,
-      availableUploaders: picgo.uploaderConfig.listUploaderTypes().sort(),
-    };
+      return {
+        ...common,
+        picgoVersion: picgo.VERSION,
+        uploader,
+        current,
+        uploaderConfigured: configuredFields.length > 0,
+        configuredFields,
+        availableUploaders: picgo.uploaderConfig.listUploaderTypes().sort(),
+      };
+    });
   }
 
-  async upload(sources: string[]): Promise<UploadedImage[]> {
-    const normalized = sources.map(normalizeSource);
-
-    // PicGo keeps input/output as mutable instance state, so serialize calls made by concurrent MCP clients.
-    const previous = this.uploadQueue;
-    let release!: () => void;
-    this.uploadQueue = new Promise<void>((resolveQueue) => {
-      release = resolveQueue;
-    });
-    await previous;
-
-    try {
-      const picgo = this.getPicGo();
-      const result = await picgo.upload(normalized);
-      if (result instanceof Error) throw result;
-      if (!Array.isArray(result) || result.length === 0) {
-        throw new Error('PicGo did not return any uploaded images. Check the uploader configuration and PicGo logs.');
+  async upload(sources: string[]): Promise<UploadBatchResult> {
+    return this.serialized(async () => {
+      if (sources.length < 1 || sources.length > 20) {
+        throw new Error('Provide between 1 and 20 image sources.');
       }
-      return result.map(toUploadedImage);
-    } catch (error) {
-      throw new Error(`PicGo upload failed: ${errorMessage(error)}`, { cause: error });
-    } finally {
-      release();
-    }
+      const picgo = this.getPicGo();
+      const outputTemplate = picgo.getConfig<string>('settings.picgoMcp.outputFormat') ??
+        picgo.getConfig<string>('customOutputFormat') ?? '${url}';
+      const nameTemplate = picgo.getConfig<string>('settings.picgoMcp.uploadNameTemplate') ??
+        picgo.getConfig<string>('customUploadName');
+      const now = new Date();
+      // Validate settings before any remote side effect.
+      validateOutputTemplate(outputTemplate);
+      if (nameTemplate !== undefined && nameTemplate !== '') {
+        renderUploadName(nameTemplate, 'image.png', 0, sources.length, now);
+      }
+
+      const images: UploadedImage[] = [];
+      const results: UploadResult[] = [];
+      try {
+        for (const [index, source] of sources.entries()) {
+          this.uploadContext = { index, count: sources.length, now, nameTemplate };
+          let output: IImgInfo[] = [];
+          let failure: unknown;
+          let failed = false;
+          // One input per lifecycle preserves identity when a transformer filters failures.
+          picgo.output = [];
+          try {
+            const normalized = normalizeSource(source);
+            const uploaded = await picgo.upload([normalized]);
+            if (uploaded instanceof Error) throw uploaded;
+            output = Array.isArray(uploaded) ? uploaded : [];
+          } catch (error) {
+            failed = true;
+            failure = error;
+            output = this.uploadContext.lifecycle?.output ?? picgo.output;
+          }
+          const completed = output.filter((image) => image.imgUrl);
+          images.push(...completed.map((image) => toUploadedImage(image, index)));
+          if (failed || completed.length === 0 || completed.length !== output.length) {
+            results.push({
+              index,
+              source: redactHomePath(source),
+              status: 'error',
+              error: publicErrorMessage(failure ?? new Error(
+                'PicGo returned incomplete upload results. Review the successful images before retrying this source.',
+              )),
+            });
+          } else {
+            results.push({ index, source: redactHomePath(source), status: 'success' });
+          }
+        }
+      } finally {
+        this.uploadContext = undefined;
+      }
+      return {
+        images,
+        results,
+        formattedOutput: images.map((image) => renderOutput(outputTemplate, image.url, image.fileName ?? 'image')).join('\n'),
+      };
+    });
   }
 }
