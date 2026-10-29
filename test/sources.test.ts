@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
-import { join, relative } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { after, test } from 'node:test';
 import { normalizeSource } from '../src/sources.js';
@@ -13,8 +14,17 @@ after(() => rmSync(directory, { recursive: true, force: true }));
 
 test('normalizes local files, relative paths and file URLs', () => {
   assert.equal(normalizeSource(file), file);
-  assert.equal(normalizeSource(relative(process.cwd(), file)), file);
   assert.equal(normalizeSource(pathToFileURL(file).href), file);
+  const previousDirectory = process.cwd();
+  try {
+    // The checkout and system temp directory can be on different Windows drives.
+    process.chdir(directory);
+    const relativePath = relative(process.cwd(), file);
+    assert.equal(isAbsolute(relativePath), false);
+    assert.equal(normalizeSource(relativePath), file);
+  } finally {
+    process.chdir(previousDirectory);
+  }
 });
 
 test('validates file URLs with the same local file checks', () => {
@@ -37,13 +47,30 @@ test('expands home paths before file validation', () => {
   assert.throws(() => normalizeSource('~'), { message: `Image source is not a file: ${homedir()}` });
 });
 
-test('treats Windows drive and UNC paths as file sources', () => {
-  for (const source of [
+test('treats Windows drive and UNC paths as file sources', (t) => {
+  const sources = [
     'C:\\picgo-mcp-missing-392dff92\\image.png',
     'C:/picgo-mcp-missing-392dff92/image.png',
     '\\\\picgo-mcp-missing-392dff92\\share\\image.png',
-  ]) {
-    assert.throws(() => normalizeSource(source), { message: `Image file does not exist: ${source}` });
+  ];
+  const fileStat = fs.statSync(file);
+  const exists = t.mock.method(fs, 'existsSync', () => true);
+  const stat = t.mock.method(fs, 'statSync', () => fileStat);
+  syncBuiltinESMExports();
+  try {
+    for (const source of sources) assert.equal(normalizeSource(source), source);
+    assert.deepEqual(exists.mock.calls.map(call => call.arguments[0]), sources);
+    assert.deepEqual(stat.mock.calls.map(call => call.arguments[0]), sources);
+
+    exists.mock.mockImplementation(() => false);
+    for (const source of sources) {
+      assert.throws(() => normalizeSource(source), { message: `Image file does not exist: ${source}` });
+    }
+    assert.equal(stat.mock.callCount(), sources.length);
+  } finally {
+    exists.mock.restore();
+    stat.mock.restore();
+    syncBuiltinESMExports();
   }
 });
 

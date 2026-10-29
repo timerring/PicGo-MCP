@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { resolve } from 'node:path';
+import { resolve, sep } from 'node:path';
 import { after, test } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -36,8 +36,9 @@ test('status redacts the local home directory from config paths', async () => {
     source: 'argument',
   });
   const status = await service.status();
-  assert.equal(status.configPath, '~/.picgo/nonexistent-private-test.json');
-  assert.deepEqual(status.searchedPaths, ['~/.picgo/nonexistent-private-test.json']);
+  const publicPath = `~${sep}.picgo${sep}nonexistent-private-test.json`;
+  assert.equal(status.configPath, publicPath);
+  assert.deepEqual(status.searchedPaths, [publicPath]);
   assert.equal(JSON.stringify(status).includes(homedir()), false);
 });
 
@@ -75,7 +76,7 @@ test('upload rejects a missing local file before invoking PicGo', async () => {
     searchedPaths: [configPath],
     source: 'argument',
   });
-  const result = await service.upload(['/definitely/not/a/picture.png']);
+  const result = await service.upload([resolve(temporaryDirectory, 'missing-picture.png')]);
   assert.equal(result.results[0].status, 'error');
   assert.match(result.results[0].error!, /does not exist/);
   assert.deepEqual(result.images, []);
