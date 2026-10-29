@@ -14,13 +14,13 @@ writeFileSync(configPath, JSON.stringify({ picBed: { uploader: 'smms', current: 
 
 after(() => rmSync(temporaryDirectory, { recursive: true, force: true }));
 
-test('status reports metadata without returning secret values', () => {
+test('status reports metadata without returning secret values', async () => {
   const service = new PicGoService({
     configPath,
     searchedPaths: [configPath],
     source: 'argument',
   });
-  const status = service.status();
+  const status = await service.status();
   assert.equal(status.picgoVersion, '3.0.1');
   assert.equal(status.uploader, 'smms');
   assert.equal(status.uploaderConfigured, false);
@@ -28,14 +28,14 @@ test('status reports metadata without returning secret values', () => {
   assert.equal(JSON.stringify(status).includes('token'), false);
 });
 
-test('status redacts the local home directory from config paths', () => {
+test('status redacts the local home directory from config paths', async () => {
   const privatePath = resolve(homedir(), '.picgo/nonexistent-private-test.json');
   const service = new PicGoService({
     configPath: privatePath,
     searchedPaths: [privatePath],
     source: 'argument',
   });
-  const status = service.status();
+  const status = await service.status();
   assert.equal(status.configPath, '~/.picgo/nonexistent-private-test.json');
   assert.deepEqual(status.searchedPaths, ['~/.picgo/nonexistent-private-test.json']);
   assert.equal(JSON.stringify(status).includes(homedir()), false);
@@ -75,14 +75,21 @@ test('upload rejects a missing local file before invoking PicGo', async () => {
     searchedPaths: [configPath],
     source: 'argument',
   });
-  await assert.rejects(() => service.upload(['/definitely/not/a/picture.png']), /does not exist/);
+  const result = await service.upload(['/definitely/not/a/picture.png']);
+  assert.equal(result.results[0].status, 'error');
+  assert.match(result.results[0].error!, /does not exist/);
+  assert.deepEqual(result.images, []);
 });
 
 test('both upload tools return the compact payload and propagate failures', async (t) => {
   const service = new PicGoService({ configPath, searchedPaths: [configPath], source: 'argument' });
-  const images = [{ url: 'https://example.test/image.png', fileName: 'image.png' }];
-  const upload = t.mock.method(service, 'upload', async () => images);
-  t.mock.method(service, 'formatOutput', () => '![image](https://example.test/image.png)');
+  const images = [{ sourceIndex: 0, url: 'https://example.test/image.png', fileName: 'image.png' }];
+  const payload = {
+    images,
+    results: [{ index: 0, source: '/image.png', status: 'success' as const }],
+    formattedOutput: '![image](https://example.test/image.png)',
+  };
+  const upload = t.mock.method(service, 'upload', async () => payload);
   const server = createServer(service);
   const client = new Client({ name: 'picgo-mcp-test', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -97,15 +104,22 @@ test('both upload tools return the compact payload and propagate failures', asyn
       const result = await client.callTool(request);
       assert.equal(result.isError, undefined);
       const content = result.content as Array<{ type: string; text: string }>;
-      assert.deepEqual(JSON.parse(content[0].text), {
-        images,
-        formattedOutput: '![image](https://example.test/image.png)',
-      });
+      assert.deepEqual(JSON.parse(content[0].text), payload);
     }
     assert.deepEqual(upload.mock.calls.map((call) => call.arguments[0]), [
       ['/image.png'],
       ['/image.png', '/second.png'],
     ]);
+
+    const partial = {
+      ...payload,
+      results: [...payload.results, { index: 1, source: '/second.png', status: 'error' as const, error: 'Upload failed' }],
+    };
+    upload.mock.mockImplementation(async () => partial);
+    const partialResult = await client.callTool(requests[1]);
+    assert.equal(partialResult.isError, true);
+    const partialContent = partialResult.content as Array<{ type: string; text: string }>;
+    assert.deepEqual(JSON.parse(partialContent[0].text), partial);
 
     upload.mock.mockImplementation(async () => { throw new Error('Upload failed'); });
     for (const request of requests) {

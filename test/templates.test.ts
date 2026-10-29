@@ -25,3 +25,11 @@ test('renders URL and Markdown output formats without evaluating code', () => {
   assert.equal(renderOutput('${url}', url, 'image.png'), url);
   assert.equal(renderOutput('![${uploadedName}](${url})', url, 'image.png'), `![image](${url})`);
 });
+
+test('template validation treats substituted values as literal data', () => {
+  assert.equal(renderOutput('${url}', 'https://example.test/${literal}.png', 'image.png'),
+    'https://example.test/${literal}.png');
+  assert.equal(renderUploadName('${fileName}${extName}', '${literal}.png', 0, 1), '${literal}.png');
+  assert.throws(() => renderOutput('${url', 'https://example.test/image.png', 'image.png'), /closing brace/);
+  assert.throws(() => renderUploadName('..\\${fileName}${extName}', 'image.png', 0, 1), /path separators/);
+});

@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createRequire } from 'node:module';
 import { z } from 'zod';
 import type { PicGoService } from './picgo-service.js';
+import { publicErrorMessage } from './errors.js';
 
 const { version } = createRequire(import.meta.url)('../package.json') as { version: string };
 
@@ -10,7 +11,7 @@ function jsonContent(value: unknown) {
 }
 
 function toolError(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = publicErrorMessage(error);
   return { isError: true as const, content: [{ type: 'text' as const, text: message }] };
 }
 
@@ -19,8 +20,11 @@ export function createServer(service: PicGoService): McpServer {
 
   async function upload(sources: string[]) {
     try {
-      const images = await service.upload(sources);
-      return { content: jsonContent({ images, formattedOutput: service.formatOutput(images) }) };
+      const result = await service.upload(sources);
+      return {
+        ...(result.results.some((item) => item.status === 'error') ? { isError: true as const } : {}),
+        content: jsonContent(result),
+      };
     } catch (error) {
       return toolError(error);
     }
@@ -41,7 +45,7 @@ export function createServer(service: PicGoService): McpServer {
     'upload_images',
     {
       title: 'Upload multiple images with PicGo',
-      description: 'Upload up to 20 local image files or HTTP(S) image URLs in one PicGo batch.',
+      description: 'Upload up to 20 images sequentially. Results identify each source by index; images retain successful URLs with sourceIndex, including on partial failure. Retry only failed sources after checking their successful images.',
       inputSchema: {
         sources: z
           .array(z.string().min(1))
@@ -64,7 +68,7 @@ export function createServer(service: PicGoService): McpServer {
     },
     async () => {
       try {
-        return { content: jsonContent(service.status()) };
+        return { content: jsonContent(await service.status()) };
       } catch (error) {
         return toolError(error);
       }

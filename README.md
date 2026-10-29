@@ -12,6 +12,8 @@
 - 自动发现 PicGo Desktop、PicGo Core 和 CLI 配置。
 - 支持自定义上传文件名与返回格式。
 - 并发调用自动排队，避免 PicGo 的可变上传状态互相污染。
+- 批量请求逐张上传，保留成功链接并逐项报告失败。
+- 检测配置文件变更，提示重连以加载新设置。
 - 状态工具不返回 token、secret 等配置值，并将用户主目录显示为 `~`。
 
 ## 环境要求
@@ -175,7 +177,7 @@ ${url}
 ![${uploadedName}](${url})
 ```
 
-工具响应包含 `images` 图片信息和按模板生成的 `formattedOutput`。图片链接从 `images[].url` 获取；需要 Markdown 时，将输出模板设置为 `![${uploadedName}](${url})`。
+工具响应包含 `images` 图片信息、`results` 逐项状态和按模板生成的 `formattedOutput`。图片链接从 `images[].url` 获取；需要 Markdown 时，将输出模板设置为 `![${uploadedName}](${url})`。模板语法在开始上传前校验。
 
 响应字段已精简：原先读取 `urls` 或 `markdown` 的调用方，应分别改为读取 `images[].url` 或配置 Markdown 模板后读取 `formattedOutput`。
 
@@ -204,6 +206,10 @@ ${url}
 }
 ```
 
+每个输入单独执行一次 PicGo 上传流程，按输入顺序串行处理。`results[].index` 对应零基输入序号，`images[].sourceIndex` 将成功图片关联回原始输入。命名模板的 `${imgIdx}` 使用原始批量序号。
+
+只要有一项失败，工具响应的 `isError` 就为 `true`，同时保留成功的 `images` 和全部 `results`。重试前应检查对应输入已有的成功图片，再选择需要重试的来源。配置或模板校验失败时，工具返回全局错误，上传尚未开始。
+
 ### `get_picgo_status`
 
 返回配置是否存在、PicGo 版本、当前上传器、已配置字段名和可用上传器。该工具不会返回配置值或图床凭据。
@@ -214,11 +220,19 @@ ${url}
 {
   "images": [
     {
+      "sourceIndex": 0,
       "url": "https://cdn.example.com/images/2026-08-23-17-34-47-example.png",
       "fileName": "2026-08-23-17-34-47-example.png",
       "width": 800,
       "height": 600,
       "size": 123456
+    }
+  ],
+  "results": [
+    {
+      "index": 0,
+      "source": "/path/to/example.png",
+      "status": "success"
     }
   ],
   "formattedOutput": "https://cdn.example.com/images/2026-08-23-17-34-47-example.png"
@@ -229,13 +243,15 @@ ${url}
 
 MCP 客户端通常会启动一个 `picgo-mcp` stdio 进程，并在当前客户端会话期间复用它。只有调用上传工具时才会读取图片并访问图片来源和图床服务；客户端关闭连接后，server 进程退出并释放内存。
 
-PicGo 会在实例上保存可变的输入和输出状态，因此本项目会将并发上传请求串行执行。
+PicGo 会在实例上保存可变的输入和输出状态，因此上传和状态查询共用串行队列。一个批次始终使用开始时的配置和模板。每次操作开始时检查配置文件内容，发现外部修改后提示重启 MCP 连接，重连后加载新设置。这样可防止继续使用旧图床，同时避免 PicGo Core 反复实例化导致全局监听器累积。
+
+MCP 协议消息使用 stdout，PicGo 和插件的 `console` 日志统一使用 stderr。插件应通过 `console` 或 PicGo 日志接口输出日志，并将 stdout 留给 MCP 协议。
 
 ## 安全说明
 
 - 不要在命令参数中传递 token，凭据应由 PicGo 配置管理。
 - MCP 工具不会返回图床凭据；状态工具只返回字段名。
-- 主目录路径在工具响应中会被替换为 `~`。
+- 本地来源、配置路径和错误消息中的主目录会显示为 `~`，远程图片 URL 保持原样。
 - HTTP(S) 图片会先由 PicGo 下载，再上传到已配置图床。
 - PicGo 会按配置加载插件，只安装并启用可信插件。
 - 不要把 stdio server 暴露给不可信客户端。
@@ -251,7 +267,7 @@ npm test
 npm run check
 ```
 
-当前测试覆盖配置发现、MCP 工具注册、状态脱敏、上传输入校验、命名模板、输出模板和发布文件隐私检查。
+当前测试覆盖配置发现与变更检测、真实 stdio 通信和日志隔离、MCP 工具响应、批量部分失败、串行队列恢复、路径脱敏、跨平台来源解析、命名与输出模板、发布文件隐私检查。上传测试使用临时配置和本地模拟上传器。
 
 ## License
 
